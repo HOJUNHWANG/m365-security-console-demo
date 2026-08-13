@@ -749,6 +749,79 @@ def source_vocabulary(root: pathlib.Path) -> set[str]:
     return {x for x in lits if x}
 
 
+# What each trend series means, mirroring app/cache.py::append_history. The Overview trend tile
+# prints the LAST point of the series, so this is not decoration - it is the value the page shows.
+HISTORY_ANCHORS = {
+    "secureScorePct": lambda o: (round(o["secureScore"]["current"] / o["secureScore"]["max"] * 100, 1)
+                                 if o.get("secureScore", {}).get("max") else None),
+    "mfaPercent": lambda o: o.get("mfaStatus", {}).get("percent"),
+    "activeAlerts": lambda o: o.get("securityAlerts", {}).get("count"),
+    "activeIncidents": lambda o: o.get("securityIncidents", {}).get("activeCount"),
+    "globalAdmins": lambda o: o.get("adminAccounts", {}).get("globalAdminCount"),
+    "guestsPending": lambda o: o.get("accountSummary", {}).get("guestsPending"),
+}
+
+# Metrics that barely ever move. A global-admin count that wanders from 9 to 2 over two weeks is not
+# a noisy chart, it is a false story about eight role changes.
+NEARLY_STATIC = {"globalAdmins"}
+
+# Numbers the application prints straight out of a module-level constant. These are configuration,
+# not measurements, so jittering them makes the page contradict the code shipped beside it.
+FIXED_NUMBERS = {
+    "deviceIdentity.windowDays": 7,
+    "browserClaims.windowDays": 7,
+    "riskySignins.windowDays": 7,
+    "accountSummary.dormantDays": 90,
+}
+
+
+def history_anchor(key: str, out: dict):
+    fn = HISTORY_ANCHORS.get(key)
+    if not fn:
+        return None
+    try:
+        v = fn(out)
+    except (KeyError, TypeError, ZeroDivisionError):
+        return None
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def history_series(key: str, end, n: int, rng: random.Random):
+    """A series a reader would recognise: flat stretches, changing when something happened, ending
+    exactly at the value the rest of the page reports."""
+    if end is None or n < 2:
+        return None
+
+    if "Pct" in key or "Percent" in key:
+        # Improvement arrives in steps - an action completed, a batch of registrations - not as a
+        # continuous drift. Noise is kept far below the step size so the line reads as a staircase.
+        start = max(30.0, float(end) - rng.uniform(14, 24))
+        cuts = sorted(rng.sample(range(1, n), min(11, n - 1)))
+        step = (float(end) - start) / len(cuts)
+        vals, cur, ci = [], start, 0
+        for i in range(n):
+            while ci < len(cuts) and cuts[ci] == i:
+                cur += step
+                ci += 1
+            vals.append(round(cur + rng.uniform(-0.1, 0.1), 1))
+        vals[-1] = end
+        return vals
+
+    # Counts: plateaus with occasional events, settling onto the final value before the end so the
+    # tile's number is where the line has been sitting, not a spike on the last pixel.
+    target = int(end)
+    vals, cur = [], max(0, target + (1 if key in NEARLY_STATIC else rng.randint(1, 4)))
+    while len(vals) < n:
+        dwell = rng.randint(30, 60) if key in NEARLY_STATIC else rng.randint(8, 26)
+        vals.extend([cur] * dwell)
+        delta = rng.choice([-1, 1]) if key in NEARLY_STATIC else rng.randint(-3, 3)
+        cur = max(0, cur + delta)
+    vals = vals[:n]
+    for j in range(max(0, n - rng.randint(6, 16)), n):
+        vals[j] = target
+    return vals
+
+
 def cohere(out: dict) -> list[str]:
     """Fix the things a per-value generator structurally cannot get right.
 
@@ -801,6 +874,115 @@ def cohere(out: dict) -> list[str]:
         notes.append(f"caPolicies={len(rows)} ({len(enabled)} on, {len(report)} report-only), "
                      f"exclusions={len(all_ex)}/{ea['exclusionDistinct']} distinct")
 
+    # --- Device identity: one row has to describe ONE device -------------------------------------
+    # The walker filled each field from its own pool, which produced rows that cannot exist:
+    # `entraObjectCount = 1` with the Intune object and the sign-in object reporting DIFFERENT
+    # trustTypes for what is, by that count, the same object - and the same id printed in both
+    # columns. It also put `trustType = null` on rows whose `intuneTargetState` said `liveReal`,
+    # while the Phantom-links KPI read 0: by app/sources/device_identity.py a null trustType IS the
+    # MDM-only stub, so it must set the state to `liveStub`, raise the phantom finding and be counted.
+    # And ten rows carried two Entra objects with nothing in Findings, though the source appends
+    # "N Entra objects share this device name" as a problem for exactly that.
+    #
+    # So the row's STATE is chosen first and every field is derived from it.
+    di = out.get("deviceIdentity")
+    if isinstance(di, dict) and isinstance(di.get("devices"), list):
+        rows = di["devices"]
+        n = len(rows)
+        plan = (["coherent"] * round(n * 0.55) + ["untagged"] * round(n * 0.19)
+                + ["split"] * round(n * 0.21))
+        plan = (plan + ["stale"] * n)[:n]
+        for r, state in zip(rows, plan):
+            oid = r.get("intuneDeviceId") or r.get("signInDeviceId")
+            r["problems"], r["warnings"] = [], []
+            if state == "split":
+                # Two objects: Intune points at the MDM-only stub, the device authenticates with its
+                # real Workplace registration. The fault the whole card exists to find.
+                r.update({
+                    "entraObjectCount": 2, "intuneTargetState": "liveStub",
+                    "intuneObjectTrustType": None, "intuneObjectTagged": True,
+                    "signInTrustType": "Workplace", "signInManaged": False,
+                    "signInCompliant": False, "signInTagged": False, "signInObjectSound": False,
+                    "signInExistsInEntra": True,
+                })
+                r["problems"] = [
+                    "Intune points at a phantom object (no trustType - an MDM-only stub, which "
+                    "carries no compliance state and can never satisfy a device policy)",
+                    "2 Entra objects share this device name",
+                    "the object it signs in with is NOT tagged - device-filter policies will block it",
+                ]
+            elif state == "stale":
+                r.update({
+                    "entraObjectCount": 1, "intuneTargetState": "deleted",
+                    "intuneObjectTrustType": None, "intuneObjectTagged": None,
+                    "signInTrustType": "Workplace", "signInManaged": True,
+                    "signInCompliant": True, "signInTagged": True, "signInObjectSound": True,
+                    "signInExistsInEntra": True,
+                })
+                r["warnings"] = ["Intune's azureADDeviceId still points at a deleted object - a "
+                                 "stale field only; the object this device signs in with is sound"]
+            else:
+                # ONE object means the Intune pointer and the sign-in claim resolve to the same
+                # object, so they cannot disagree about that object's own trustType.
+                tagged = state == "coherent"
+                r.update({
+                    "entraObjectCount": 1, "intuneTargetState": "liveReal",
+                    "intuneObjectTrustType": "Workplace", "intuneObjectTagged": tagged,
+                    "signInTrustType": "Workplace", "signInManaged": True,
+                    "signInCompliant": True, "signInTagged": tagged, "signInObjectSound": True,
+                    "signInExistsInEntra": True,
+                    "intuneDeviceId": oid, "signInDeviceId": oid,
+                })
+                if not tagged:
+                    r["problems"] = ["the object it signs in with is NOT tagged - device-filter "
+                                     "policies will block it"]
+            r["ok"] = not r["problems"]
+            r.update({"presentedSource": "signin", "presentedDeviceId": r.get("signInDeviceId"),
+                      "presentedTagged": r.get("signInTagged"),
+                      "presentedManaged": r.get("signInManaged"),
+                      "presentedSound": r.get("signInObjectSound"), "reregistered": False})
+
+        # The source derives duplicateObjectCount from this list, so the list is the thing to fill -
+        # setting only the count left the KPI at 0 while ten rows said otherwise.
+        di["duplicateObjectDevices"] = [
+            {"device": r["device"], "objects": 2, "trustTypes": ["Workplace", "(none)"]}
+            for r in rows if (r.get("entraObjectCount") or 0) > 1
+        ]
+        # Same for the two name lists the card prints: they have to be the rows, not an old sample.
+        di["enrolledNotTagged"] = sorted(r["device"] for r in rows
+                                        if r.get("signInTagged") is False)
+        di["taggedNotEnrolled"] = []
+
+        di.update({
+            "enrolled": n,
+            "healthy": sum(1 for r in rows if r["ok"]),
+            "problem": sum(1 for r in rows if not r["ok"]),
+            "warned": sum(1 for r in rows if r["ok"] and r["warnings"]),
+            "duplicateObjectCount": sum(1 for r in rows if r["entraObjectCount"] > 1),
+            "phantomLinkCount": sum(1 for r in rows if r["intuneTargetState"] == "liveStub"),
+            "staleIntunePointerCount": sum(1 for r in rows
+                                           if r["intuneTargetState"] in ("deleted", "missing")),
+            "signInMismatchCount": sum(1 for r in rows if r["entraObjectCount"] > 1),
+            "orphanSignInCount": 0,
+            "untaggedSignInCount": sum(1 for r in rows if r.get("signInTagged") is False),
+            "taggedObjectCount": sum(1 for r in rows if r.get("intuneObjectTagged") is True),
+            "taggedStubCount": sum(1 for r in rows if r.get("intuneObjectTagged") is True
+                                   and r["intuneTargetState"] == "liveStub"),
+            "tagInertCount": sum(1 for r in rows if r.get("presentedTagged") is True
+                                 and not r.get("presentedSound")),
+            "tagInertFromFallback": 0,
+        })
+        notes.append(f"deviceIdentity: {di['healthy']} coherent + {di['problem']} mismatched "
+                     f"+ {di['warned']} warned of {n}; {di['phantomLinkCount']} phantom, "
+                     f"{di['duplicateObjectCount']} duplicate-object")
+
+    # --- Values the app prints straight from a code constant -------------------------------------
+    # Jittering these makes the page describe a configuration the code does not have: a card whose
+    # WINDOW_DAYS is 7 announcing a "4-day window".
+    for dotted, value in FIXED_NUMBERS.items():
+        if set_path(out, dotted, value):
+            notes.append(f"{dotted} pinned to the code constant {value}")
+
     # --- Delivered mail: the sender's domain must match how the row is classified ---------------
     # "External" beside a sender in our own domain is the tell that the address was minted without
     # looking at the classification next to it.
@@ -842,23 +1024,41 @@ def cohere(out: dict) -> list[str]:
                 return s[: -len(suf)] + rep
         return s
 
+    def counted_list(nk: str, lists: dict):
+        """Which list, if any, does this number claim to count?
+
+        `*Count` and `*Total` are the obvious cases. The one that got away was `ips` beside
+        `ipList` - a bare plural noun holding a number, which the UI renders as a "5 IPs" badge
+        above a row listing ten of them. A name does not have to say "count" to be one.
+        """
+        no = nk.lower()
+        for lk in lists:
+            lo = lk.lower()
+            if lo == singular(no) + "list" or lo == no + "list":
+                return lk
+            if singular(lo) == singular(no):
+                return lk
+        if COUNTISH.search(nk):
+            stem = singular(COUNTISH.sub("", nk).strip("_").lower())
+            if stem:
+                for lk in lists:
+                    ls = singular(lk.lower())
+                    if stem in ls or ls in stem:
+                        return lk
+        return None
+
     fixed_counts = []
 
     def derive_counts(node, path=""):
         if isinstance(node, dict):
             lists = {k: v for k, v in node.items() if isinstance(v, list)}
             for nk, nv in list(node.items()):
-                if not isinstance(nv, int) or isinstance(nv, bool) or not COUNTISH.search(nk):
+                if not isinstance(nv, int) or isinstance(nv, bool):
                     continue
-                stem = singular(COUNTISH.sub("", nk).strip("_").lower())
-                if not stem:
-                    continue
-                for lk, lv in lists.items():
-                    ls = singular(lk.lower())
-                    if (stem in ls or ls in stem) and node[nk] != len(lv):
-                        node[nk] = len(lv)
-                        fixed_counts.append(f"{path}.{nk}")
-                        break
+                lk = counted_list(nk, lists)
+                if lk is not None and node[nk] != len(lists[lk]):
+                    node[nk] = len(lists[lk])
+                    fixed_counts.append(f"{path}.{nk}")
             for k, v in node.items():
                 derive_counts(v, f"{path}.{k}" if path else k)
         elif isinstance(node, list):
@@ -1022,23 +1222,43 @@ def main() -> int:
     out = g.walk(real)
     out["_collectedAt"] = base.isoformat()
 
-    # History: same shape, synthetic series. Regenerated rather than walked so the trend lines
-    # look like a plausible improving posture instead of noise.
-    if a.history:
+    # History: regenerated rather than walked, because a trend is a shape and the walker only sees
+    # points. Two things went wrong in the first version and both were visible on the page.
+    #
+    # 1. Noise drowned the signal. Over 240 points the series moved ~0.1 per step while the jitter
+    #    was +/-1.5 - fifteen times the trend - so 61% of steps reversed direction and every
+    #    sparkline rendered as a fuzzy caterpillar. Real posture metrics are not noisy: a secure
+    #    score moves when an improvement action is completed, MFA coverage moves when a person
+    #    registers, an incident count sits still for hours and then changes. They are PLATEAUS with
+    #    events, so that is what is generated - which is both more honest and much easier to read.
+    #
+    # 2. The last point contradicted the rest of the page. The Overview trend tile prints the final
+    #    history value, so a series that ended at 2 sat directly beneath an action item reading
+    #    "32 active security incidents". `app/cache.py` defines what each series means; the anchors
+    #    below mirror those formulas so the tile agrees with its own source by construction.
+    # Built LAST, after cohere() and the derived totals, because the anchors read the very values the
+    # page will print. Generating it here originally - before those passes - meant a series was
+    # anchored to a number that was then corrected underneath it, which is the same contradiction one
+    # step removed.
+    def build_history():
+        if not a.history:
+            return
         hist_real = json.loads(pathlib.Path(a.history).read_text(encoding="utf-8"))
         keys = [k for k in (hist_real[0] if hist_real else {}) if k != "ts"]
-        series, n = [], min(len(hist_real), 240)
-        for i in range(n):
-            ts = base - timedelta(hours=(n - i) * 2)
-            row = {"ts": ts.isoformat()}
-            for k in keys:
-                if "Pct" in k or "Percent" in k:
-                    row[k] = round(62 + 22 * (i / max(1, n - 1)) + g.rng.uniform(-1.5, 1.5), 1)
-                else:
-                    row[k] = max(0, int(round(8 - 6 * (i / max(1, n - 1))
-                                             + g.rng.uniform(-1.5, 1.5))))
-            series.append(row)
+        n = min(len(hist_real), 240)
+        series = [{"ts": (base - timedelta(hours=(n - i) * 2)).isoformat()} for i in range(n)]
+        anchored = []
+        for k in keys:
+            end = history_anchor(k, out)
+            vals = history_series(k, end, n, g.rng)
+            if vals is None:
+                continue
+            anchored.append(f"{k}={vals[-1]}")
+            for i, row in enumerate(series):
+                row[k] = vals[i]
         out["_history"] = series
+        print(f"history: {n} points, {len(anchored)} series anchored to the snapshot "
+              f"({', '.join(anchored)})")
 
     # Data Health describes the COLLECTION rather than the tenant, and the backend assembles it per
     # request. Walk it like everything else, then re-derive the parts that must agree with the
@@ -1083,6 +1303,8 @@ def main() -> int:
             fixed.append(f"{num_path}={len(lst)}")
     if fixed:
         print("derived totals: " + ", ".join(fixed))
+
+    build_history()      # last: its anchors read the values the page will actually print
 
     dst = pathlib.Path(a.out)
     dst.parent.mkdir(parents=True, exist_ok=True)

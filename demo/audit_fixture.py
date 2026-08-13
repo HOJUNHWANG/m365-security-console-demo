@@ -257,6 +257,127 @@ if isinstance(d.get("adminAccounts"), dict) and isinstance(d.get("accountSummary
 # ---------------------------------------------------------------------------------------------
 # 7) Data Health must describe the snapshot it ships with.
 # ---------------------------------------------------------------------------------------------
+# A bare plural noun holding a number is a count too. `ips` beside `ipList` rendered a "5 IPs" badge
+# over a row listing ten addresses, and the Count/Total rule above never looked at it.
+for src, body in d.items():
+    if not isinstance(body, dict):
+        continue
+
+    def plural_counts(node, path):
+        if isinstance(node, dict):
+            lists = {k: v for k, v in node.items() if isinstance(v, list)}
+            for nk, nv in node.items():
+                if not isinstance(nv, int) or isinstance(nv, bool):
+                    continue
+                for lk in lists:
+                    if lk.lower() in (singular(nk.lower()) + "list", nk.lower() + "list") \
+                            and nv != len(lists[lk]):
+                        f("count-vs-list", f"{path}.{nk}={nv} but {path}.{lk} lists "
+                                           f"{len(lists[lk])}")
+            for k, v in node.items():
+                plural_counts(v, f"{path}.{k}")
+        elif isinstance(node, list):
+            for v in node[:80]:
+                plural_counts(v, f"{path}[]")
+
+    plural_counts(body, src)
+
+# ---------------------------------------------------------------------------------------------
+# 8) The Overview trend tile prints the LAST history point, so it has to agree with the source it
+#    claims to trend. A series ending at 2 sat under an action item reading "32 active incidents".
+# ---------------------------------------------------------------------------------------------
+hist = d.get("_history") or []
+if hist:
+    last = hist[-1]
+
+    def anchor(path):
+        cur = d
+        for p in path.split("."):
+            if not isinstance(cur, dict) or p not in cur:
+                return None
+            cur = cur[p]
+        return cur
+
+    ss = d.get("secureScore") or {}
+    checks = {
+        "mfaPercent": anchor("mfaStatus.percent"),
+        "activeAlerts": anchor("securityAlerts.count"),
+        "activeIncidents": anchor("securityIncidents.activeCount"),
+        "globalAdmins": anchor("adminAccounts.globalAdminCount"),
+        "guestsPending": anchor("accountSummary.guestsPending"),
+    }
+    if ss.get("max"):
+        checks["secureScorePct"] = round(ss["current"] / ss["max"] * 100, 1)
+    for k, want in checks.items():
+        got = last.get(k)
+        if want is None or got is None:
+            continue
+        if abs(got - want) > 0.15:
+            f("trend-anchor", f"_history[-1].{k}={got} but the snapshot says {want} - the trend "
+                              f"tile and the rest of the page would disagree")
+
+    # A trend nobody can read is a defect too: noise larger than the trend itself.
+    for k in [k for k in last if k != "ts"]:
+        v = [r[k] for r in hist if isinstance(r.get(k), (int, float))]
+        if len(v) < 20:
+            continue
+        steps = [abs(v[i + 1] - v[i]) for i in range(len(v) - 1)]
+        rev = sum(1 for i in range(1, len(steps)) if (v[i + 1] - v[i]) * (v[i] - v[i - 1]) < 0)
+        drift = abs(v[-1] - v[0]) / max(1, len(v) - 1)
+        mean_step = sum(steps) / len(steps)
+        if mean_step > 6 * max(drift, 0.02) and rev > 0.45 * len(steps):
+            f("trend-noise", f"_history.{k}: mean step {mean_step:.2f} vs drift {drift:.3f} per "
+                             f"point and {rev}/{len(steps)} direction reversals - reads as noise")
+
+# ---------------------------------------------------------------------------------------------
+# 9) Device identity: a row must describe one device, and the KPIs must partition the fleet.
+# ---------------------------------------------------------------------------------------------
+di = d.get("deviceIdentity") or {}
+rows = di.get("devices") or []
+if rows:
+    for r in rows:
+        # Exempt a dangling Intune pointer: when its target is deleted or missing, the Intune column
+        # is describing an object that no longer exists, so it legitimately has no trustType while
+        # the one live object the device signs in with does. entraObjectCount counts live objects.
+        if r.get("intuneTargetState") in ("deleted", "missing", "none"):
+            continue
+        if r.get("entraObjectCount") == 1 and \
+                r.get("intuneObjectTrustType") != r.get("signInTrustType"):
+            f("device-identity", f"{r.get('device')}: one Entra object but the Intune and sign-in "
+                                 f"columns report different trustTypes "
+                                 f"({r.get('intuneObjectTrustType')!r} vs "
+                                 f"{r.get('signInTrustType')!r})")
+            break
+    for r in rows:
+        if r.get("intuneObjectTrustType") in (None, "(none)") \
+                and r.get("intuneTargetState") == "liveReal":
+            f("device-identity", f"{r.get('device')}: Intune object has no trustType (a stub) but "
+                                 f"intuneTargetState is liveReal - it would not be counted as a "
+                                 f"phantom link")
+            break
+    for r in rows:
+        if (r.get("entraObjectCount") or 0) > 1 and not any(
+                "Entra object" in p for p in (r.get("problems") or [])):
+            f("device-identity", f"{r.get('device')}: {r['entraObjectCount']} Entra objects but no "
+                                 f"finding says so")
+            break
+    for r in rows:
+        if bool(r.get("problems")) == bool(r.get("ok")):
+            f("device-identity", f"{r.get('device')}: ok={r.get('ok')} contradicts "
+                                 f"{len(r.get('problems') or [])} problem(s)")
+            break
+    tot = (di.get("healthy") or 0) + (di.get("problem") or 0)
+    if di.get("enrolled") and tot != di["enrolled"]:
+        f("device-identity", f"healthy {di.get('healthy')} + problem {di.get('problem')} = {tot} "
+                             f"but enrolled = {di['enrolled']}")
+    for kpi, pred in [("phantomLinkCount", lambda r: r.get("intuneTargetState") == "liveStub"),
+                      ("duplicateObjectCount", lambda r: (r.get("entraObjectCount") or 0) > 1),
+                      ("staleIntunePointerCount",
+                       lambda r: r.get("intuneTargetState") in ("deleted", "missing"))]:
+        if kpi in di and di[kpi] != sum(1 for r in rows if pred(r)):
+            f("device-identity", f"{kpi}={di[kpi]} but {sum(1 for r in rows if pred(r))} row(s) "
+                                 f"are in that state")
+
 dh = d.get("_dataHealth", {})
 if isinstance(dh, dict):
     srcs = [k for k, v in d.items()
