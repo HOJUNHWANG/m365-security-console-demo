@@ -2736,6 +2736,9 @@
         DEMO_MODE = true;
         const chip = document.getElementById('demoChip');
         if(chip) chip.style.display = '';
+        const btn = document.getElementById('refresh');
+        if(btn) btn.title = 'Re-reads the bundled synthetic snapshot. There is no backend here and '
+                          + 'no tenant is contacted.';
       }
       const res = await fetch(DEMO_FILE, {cache:'no-store'});
       if(!res.ok) throw new Error(`no backend and no ${DEMO_FILE}`);
@@ -2746,8 +2749,14 @@
       const quiet = !!(opts && opts.quiet);          // background poll: no spinner, no scroll jump
       const btn=document.getElementById('refresh');
       if(!quiet){
-        btn.disabled=true; btn.textContent= live?'⟳ Collecting…':'⟳ Loading…';
-        document.getElementById('updated').textContent= live?'Live collecting… (a few seconds)':'Loading…';
+        btn.disabled=true;
+        // In DEMO mode this button cannot collect anything - there is no backend and no tenant to
+        // reach. Saying "Live collecting…" would be the page asserting something untrue about
+        // itself, which is the one thing this dashboard is built not to do.
+        btn.textContent = DEMO_MODE ? '⟳ Re-reading…' : (live?'⟳ Collecting…':'⟳ Loading…');
+        document.getElementById('updated').textContent = DEMO_MODE
+          ? 'Re-reading the bundled demo snapshot…'
+          : (live?'Live collecting… (a few seconds)':'Loading…');
       }
       try{
         const next=await fetchSummary(live);
@@ -2767,6 +2776,7 @@
         renderNav();   // re-render so the per-tab attention badges reflect the data just loaded
         renderMain();
         if(quiet){ main.scrollTop = keepScroll; toast('Dashboard updated with a newer collection'); }
+        else if(DEMO_MODE && live){ toast('Demo: re-read the bundled snapshot — no tenant was contacted'); }
         renderAge(); renderHealth();
         return true;
       }catch(e){
@@ -2774,7 +2784,7 @@
         document.getElementById('main').innerHTML=`<div class="notice">Could not load data: ${esc(e)}. With the backend running, check the server log and .env; as a static page, check that ${DEMO_FILE} sits next to this file.</div>`;
         document.getElementById('updated').textContent='Collection failed';
         return false;
-      }finally{ if(!quiet){ btn.disabled=false; btn.textContent='⟳ Collect now'; } }
+      }finally{ if(!quiet){ btn.disabled=false; btn.textContent = DEMO_MODE ? '⟳ Reload demo data' : '⟳ Collect now'; } }
     }
 
     // Poll only while the tab is visible - a background tab polling forever is pure waste - and
