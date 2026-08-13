@@ -1,0 +1,13 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Collected data never belongs in this repository. The demo fixture under app/static/ is the only
+# dataset that is committed, and it is generated - see demo/README.md.
+data/
+*.cer
+*.pfx
+health.json
