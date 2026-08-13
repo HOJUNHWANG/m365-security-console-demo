@@ -311,4 +311,16 @@ async def index():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon():
+    """Served at the root as well as under /static.
+
+    index.html asks for `favicon.svg` RELATIVE to itself, because the same file is published as a
+    static site (GitHub Pages) where the page sits under a project subpath and an absolute
+    `/static/...` resolves outside it - which silently cost the published demo its tab icon. A
+    relative path is correct there, so the backend has to answer at the root too.
+    """
+    return FileResponse(STATIC_DIR / "favicon.svg")
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
