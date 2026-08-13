@@ -75,7 +75,8 @@ LAST = ["lovelace", "hopper", "turing", "dijkstra", "liskov", "torvalds", "hamil
          "kovac", "lindqvist", "menon", "duarte", "brandt", "sorensen", "keller"]
 
 ROOMS = ["conf-atrium", "conf-harbor", "conf-summit", "reception-kiosk", "lobby-display",
-         "warehouse-scanner", "training-room"]
+         "warehouse-scanner", "training-room", "conf-observatory", "shipping-terminal",
+         "showroom-display", "conf-annex", "breakroom-signage"]
 
 # --------------------------------------------------------------------------------------------
 # Authored value pools for paths the UI branches on or renders prominently. Everything here is
@@ -125,6 +126,10 @@ CA_POLICY_TABLE = [
      "users": "2 target(s)", "apps": "2 app(s)"},
 ]
 CA_POLICIES = [p["name"] for p in CA_POLICY_TABLE]
+# The standing exclusion set: two emergency-access accounts (Microsoft recommends exactly two) and
+# the unattended room devices that cannot complete an interactive control.
+CA_EXCLUDED = [f"breakglass-01@{DOMAIN}", f"breakglass-02@{DOMAIN}",
+               f"conf-atrium@{DOMAIN}", f"reception-kiosk@{DOMAIN}"]
 ROLES = ["Global Administrator", "Global Reader", "Exchange Administrator",
          "Intune Administrator", "Security Administrator", "User Administrator",
          "Directory Readers", "Conditional Access Administrator"]
@@ -137,7 +142,8 @@ SUBJECTS = ["Invoice 40218 overdue - action required", "Your mailbox storage is 
 GROUPS = ["SG-All-Employees", "SG-CA-Exclusions-BreakGlass", "SG-Pilot-Wave1",
           "SG-Room-Accounts", "SG-Managed-Devices"]
 SITES = ["/sites/marketing", "/sites/projects", "/sites/hr-public", "/sites/vendor-exchange",
-         "/personal/demo_user_contoso_com"]
+         "/personal/demo_user_contoso_com", "/sites/field-sales", "/sites/quality-records",
+         "/sites/onboarding", "/sites/supplier-portal", "/sites/design-review"]
 
 CA_CONTROLS = ["mfa", "compliantDevice", "block", "passwordChange", "AppTokenProtection",
                "SignInTokenProtection", "domainJoinedDevice"]
@@ -153,10 +159,14 @@ MAIL_LOCATIONS = ["Inbox", "Inbox/folder", "Junk Email", "Quarantine", "Deleted 
 SENDER_DOMAINS = ["mail-delivery.example", "invoice-portal.example", "shared-docs.example",
                   "secure-notice.example", "parcel-track.example"]
 TRANSPORT_RULES = ["Inbound external banner", "Redirect failed authentication",
-                   "Block executable attachments", "Bypass filtering for partner"]
+                   "Block executable attachments", "Bypass filtering for partner",
+                   "Quarantine unauthenticated bulk mail", "Strip active content from archives",
+                   "Flag lookalike display names", "Route finance approvals to review"]
 SIMULATIONS = ["Credential harvest - company-wide awareness",
                "Phishing drill - finance team", "Link in attachment - quarterly test",
-               "Malware attachment - onboarding cohort"]
+               "Malware attachment - onboarding cohort", "Drive-by URL - all staff",
+               "OAuth consent lure - pilot group", "Payroll pretext - HR cohort",
+               "Delivery notice lure - warehouse"]
 # Public Microsoft Secure Score improvement-action titles.
 SECURE_SCORE_ACTIONS = [
     "Ensure multifactor authentication is enabled for all users",
@@ -227,10 +237,12 @@ OVERRIDES: dict[str, list] = {
     "browserClaims.users[].editions[]": EDITIONS,
     "browserClaims.extensionName": ["Windows Accounts"],
     "browserClaims.pilotGroup": ["CA-Pilot-Users"],
-    "browserClaims.scopePlatforms[]": ["windows"],
+    "browserClaims.scopePlatforms[]": ["windows", "macOS"],
     "browserClaims.scopePolicies[]": CA_POLICIES[3:6],
     "intuneDevices.byOs": None,          # dict keyed by OS name - handled by KEY_POOLS
     "intuneDevices.devices[].os": ["Windows"],
+    "intuneDevices.devices[].compliance": ["compliant", "compliant", "compliant", "noncompliant"],
+    "intuneDevices.devices[].owner": ["Company", "Company", "Company", "Personal"],
     "intuneDevices.devices[].edition": EDITIONS,
     "deviceIdentity.tag": ["Approved-Device"],
     # --- locations, apps, policies ----------------------------------------------------------
@@ -263,7 +275,9 @@ OVERRIDES: dict[str, list] = {
     "sharingLinks.links[].site": SITES,
     "sharepointSharing.newSites[].url": SITES,
     "sharingLinks.newSites[].url": SITES,
-    "sharingLinks.newSites[].name": ["Marketing", "Projects", "HR Public", "Vendor Exchange"],
+    "sharingLinks.newSites[].name": ["Marketing", "Projects", "HR Public", "Vendor Exchange",
+                                    "Field Sales", "Quality Records", "Onboarding",
+                                    "Supplier Portal", "Design Review"],
 
     # --- Conditional Access evaluation ------------------------------------------------------
     "riskySignins.caReportOnlyImpact[].controls[]": CA_CONTROLS,
@@ -344,8 +358,10 @@ OVERRIDES: dict[str, list] = {
     # --- remaining named things -------------------------------------------------------------
     "accountSummary.guestList[].state": ["Accepted", "PendingAcceptance"],
     "licenses.skus[].sku": ["SPB", "THREAT_INTELLIGENCE", "POWER_BI_STANDARD",
-                            "Microsoft_365_Copilot", "EXCHANGESTANDARD"],
-    "exchangeEop.allowlist.allowDomains[]": ["partner.example", "affiliate.example"],
+                            "Microsoft_365_Copilot", "EXCHANGESTANDARD", "AAD_PREMIUM",
+                            "INTUNE_A", "FLOW_FREE", "TEAMS_EXPLORATORY"],
+    "exchangeEop.allowlist.allowDomains[]": ["partner.example", "affiliate.example",
+                                             "supplier.example", "logistics.example"],
     "exchangeEop.allowlist.ownDomains[]": [DOMAIN, TENANT],
     "exchangeEop.quarantine.byType[].type": ["Phish", "Spam", "Malware", "HighConfPhish", "Bulk"],
     "riskySignins.caReportOnlyByControl[].control": CA_CONTROLS,
@@ -363,7 +379,9 @@ OVERRIDES: dict[str, list] = {
                                       "2 apps selected"],
     "intuneDevices.compliancePolicies[].name": ["Windows baseline compliance",
                                                 "Encryption required",
-                                                "Minimum OS version"],
+                                                "Minimum OS version",
+                                                "Secure Boot and code integrity",
+                                                "Defender real-time protection"],
     "riskySignins.caFailByPolicy[].policy": CA_POLICIES,
     "deviceIdentity.devices[].signInTrustType": TRUST_TYPES,
     "deviceIdentity.devices[].intuneObjectTrustType": TRUST_TYPES,
@@ -387,6 +405,32 @@ OVERRIDES: dict[str, list] = {
     "browserClaims.findings[].text": FINDING_TEXT,
     "sharepointSharing.findings[].text": FINDING_TEXT,
     "sharingLinks.findings[].text": FINDING_TEXT,
+}
+
+# Paths whose value IDENTIFIES its row, so a pool draw there must never repeat. Cycling a
+# four-name pool over ten rows produced two rules called "Bypass filtering for partner", which reads
+# as a real duplicate rather than as filler. Everything else may repeat: many sign-ins legitimately
+# share a device claim, a severity or an app.
+UNIQUE_PATHS = {
+    "exchangeEop.transportRules[].name",
+    "exchangeEop.transportRules[].description",
+    "sharingLinks.newSites[].name",
+    "sharingLinks.newSites[].url",
+    "sharepointSharing.newSites[].url",
+    "intuneDevices.compliancePolicies[].name",
+    "riskySignins.caPolicyEval[].policy",
+    "unattendedAccounts.policies[].policy",
+    "unattendedAccounts.policies[].name",
+    "unattendedAccounts.findings[].name",
+    "unattendedAccounts.accounts[].name",
+    "unattendedAccounts.candidates[].name",
+    "licenses.skus[].sku",
+    "attackSimulation.simulations[].displayName",
+    "secureScoreActions.recommendations[].title",
+    "entraAccess.caPolicies[].name",
+    "sharingLinks.sites[].path",
+    "sharingLinks.scannedSites[]",
+    "sharingLinks.configuredPaths[]",
 }
 
 # Paths that always name a device, whatever the original string looked like.
@@ -481,10 +525,27 @@ class Gen:
         self.fallbacks: dict[str, int] = {}
         self.passthrough: set[str] = set()
         self._n = 0
+        self._nonce = 0        # identifies the padded copy an element belongs to (0 = original)
+        self._pad = 0
+        self._numid = 0
+        self._drawn: dict[str, int] = {}    # per-path draw counter, for pools that must not repeat
+
+    def _key(self, real: str) -> str:
+        return f"{real}\x00{self._nonce}"
+
+    def draw(self, path: str, pool: list) -> str:
+        """Sequential draw for a path whose value identifies its row, so it must not repeat. A pool
+        shorter than the list gets suffixed rather than wrapping onto a name already used."""
+        i = self._drawn.get(path, 0)
+        self._drawn[path] = i + 1
+        if i < len(pool):
+            return pool[i]
+        return f"{pool[i % len(pool)]} {i // len(pool) + 1}"
 
     # -- identifier synthesis. Consistent per input, so cross-references stay coherent: the same
     # -- person referenced by two sources gets the same fake UPN in both.
     def upn(self, real: str) -> str:
+        real = self._key(real)
         if real not in self.upns:
             i = len(self.upns)
             f, l = FIRST[i % len(FIRST)], LAST[(i // len(FIRST) + i) % len(LAST)]
@@ -497,24 +558,28 @@ class Gen:
         return self.upns[real]
 
     def gid(self, real: str) -> str:
+        real = self._key(real)
         if real not in self.ids:
             n = len(self.ids) + 1
             self.ids[real] = f"{n:08x}-1111-4222-8333-{n:012x}"
         return self.ids[real]
 
     def host(self, real: str) -> str:
+        real = self._key(real)
         if real not in self.hosts:
             n = len(self.hosts) + 1
             self.hosts[real] = f"LAPTOP-DEMO{n:03d}"
         return self.hosts[real]
 
     def ip(self, real: str) -> str:
+        real = self._key(real)
         if real not in self.ips:
             self.ips[real] = IP_POOL[len(self.ips) % len(IP_POOL)]
         return self.ips[real]
 
     def ip6(self, real: str) -> str:
         """RFC 3849 documentation prefix, so the value is recognisably not routable."""
+        real = self._key(real)
         if real not in self.ips:
             n = len(self.ips) + 1
             self.ips[real] = f"2001:db8:{n:x}:{n * 7 % 65536:x}::{n:x}"
@@ -523,6 +588,7 @@ class Gen:
     def person(self, real: str) -> str:
         """A display name. Service principals stay service principals - decided from the shape of
         the original (an application name carries a platform word), never from its content."""
+        real = self._key(real)
         if real not in self.upns:
             i = len(self.upns)
             if any(h in real.lower() for h in APP_HINTS):
@@ -567,6 +633,8 @@ class Gen:
     def string(self, real: str, path: str):
         if path in OVERRIDES and OVERRIDES[path]:
             pool = OVERRIDES[path]
+            if path in UNIQUE_PATHS:
+                return self.draw(path, pool)
             self._n += 1
             return pool[self._n % len(pool)]
         if path in HOST_PATHS:
@@ -587,7 +655,8 @@ class Gen:
             return self.host(real)
         if RE_NUMID.match(real):
             # Short numeric strings are ids (incident numbers, error codes), not free text.
-            return str(1000 + (len(self.ids) * 37) % 9000) if len(real) > 3 else real
+            self._numid += 1
+            return str(1000 + self._numid * 7) if len(real) > 3 else real
         if RE_THUMB.match(real) or RE_LONGHEX.match(real):
             return self.gid(real).replace("-", "")[:len(real)]
         if real == "":
@@ -631,9 +700,23 @@ class Gen:
             # row: one user with two Windows editions, a policy whose control reads "block block".
             if n and path not in FIXED_LENGTH_PATHS and (isinstance(node[0], dict) or n >= 5):
                 n = max(1, min(LIST_CAP, int(round(n * LIST_SCALE))))
-            # Elements beyond the original length are produced by walking the existing ones again;
-            # the generators are stateful, so each pass yields different synthetic values.
-            return [self.walk(node[i % len(node)], f"{path}[]") for i in range(n)] if node else []
+            if not node:
+                return []
+            # Elements beyond the original length are produced by walking the existing ones again.
+            # Identifier synthesis memoises on the ORIGINAL value so that a person referenced by two
+            # sources is the same fake person in both - which means a re-walked element would come
+            # back with the same id, name and hostname as the element it was copied from. Padded
+            # elements therefore carry a nonce that makes them a fresh entity, while the original
+            # elements keep nonce 0 and stay coherent across sources.
+            out = []
+            for i in range(n):
+                prev = self._nonce
+                if i >= len(node):
+                    self._pad += 1
+                    self._nonce = self._pad
+                out.append(self.walk(node[i % len(node)], f"{path}[]"))
+                self._nonce = prev
+            return out
         if isinstance(node, bool):
             return node
         if isinstance(node, (int, float)):
@@ -681,6 +764,15 @@ def cohere(out: dict) -> list[str]:
         rows = ea["caPolicies"][:len(CA_POLICY_TABLE)]      # never repeat a policy name
         for row, spec in zip(rows, CA_POLICY_TABLE):
             row.update({k: (list(v) if isinstance(v, list) else v) for k, v in spec.items()})
+            # Exclusions are drawn from a SMALL standing set. In a real tenant they are the same
+            # two break-glass accounts and a handful of room devices appearing across many
+            # policies - which is the whole reason the panel reports a "distinct principals"
+            # figure. Minting a fresh principal per row would make 36 exclusions look like 36
+            # separate decisions instead of four.
+            for j, ex in enumerate(row.get("excluded") or []):
+                ex["name"] = CA_EXCLUDED[j % len(CA_EXCLUDED)]
+                ex["kind"] = "user"
+                ex["acknowledged"] = False    # CA_ACKNOWLEDGED_EXCLUSIONS is not configured here
             # One principal cannot be excluded twice from the same policy.
             seen, uniq = set(), []
             for ex in row.get("excluded") or []:
@@ -738,6 +830,150 @@ def cohere(out: dict) -> list[str]:
             if isinstance(s, dict) and "domain" in s:
                 s["domain"] = (SENDER_DOMAINS + ["partner.example", DOMAIN])[
                     i % (len(SENDER_DOMAINS) + 2)]
+
+    # --- Every "<thing>Count" / "<thing>Total" must equal the list of <thing>s beside it ---------
+    # Hand-listing these pairs missed nineteen of them. Matching by name instead means a source
+    # added later is covered without anyone remembering to add it here.
+    COUNTISH = re.compile(r"(Count|Total|count|total)$")
+
+    def singular(s: str) -> str:
+        for suf, rep in (("ies", "y"), ("ses", "s"), ("s", "")):
+            if s.endswith(suf):
+                return s[: -len(suf)] + rep
+        return s
+
+    fixed_counts = []
+
+    def derive_counts(node, path=""):
+        if isinstance(node, dict):
+            lists = {k: v for k, v in node.items() if isinstance(v, list)}
+            for nk, nv in list(node.items()):
+                if not isinstance(nv, int) or isinstance(nv, bool) or not COUNTISH.search(nk):
+                    continue
+                stem = singular(COUNTISH.sub("", nk).strip("_").lower())
+                if not stem:
+                    continue
+                for lk, lv in lists.items():
+                    ls = singular(lk.lower())
+                    if (stem in ls or ls in stem) and node[nk] != len(lv):
+                        node[nk] = len(lv)
+                        fixed_counts.append(f"{path}.{nk}")
+                        break
+            for k, v in node.items():
+                derive_counts(v, f"{path}.{k}" if path else k)
+        elif isinstance(node, list):
+            for v in node:
+                derive_counts(v, f"{path}[]")
+
+    derive_counts(out)
+    if fixed_counts:
+        notes.append(f"counts re-derived from their own lists: {len(fixed_counts)}")
+
+    # --- Histograms are rebuilt from the rows they describe --------------------------------------
+    # byOs summing to 33 above a table of 47 devices is the same class of fault as a wrong total,
+    # except the truth is recoverable: count the rows.
+    for src, list_key, hist_map in [
+        ("intuneDevices", "devices", {"byOs": "os", "byEdition": "edition",
+                                      "byJoinType": "joinType", "byOwner": "owner",
+                                      "byCompliance": "compliance"}),
+        ("browserClaims", "users", {"byStatus": "status"}),
+    ]:
+        body = out.get(src)
+        if not isinstance(body, dict) or not isinstance(body.get(list_key), list):
+            continue
+        rows = body[list_key]
+        for hk, field in hist_map.items():
+            if not isinstance(body.get(hk), dict) or not all(field in r for r in rows):
+                continue
+            tally: dict = {}
+            for r in rows:
+                tally[str(r[field])] = tally.get(str(r[field]), 0) + 1
+            body[hk] = tally
+            notes.append(f"{src}.{hk} rebuilt from {len(rows)} rows")
+
+    # Compliance split has to partition the fleet, not float free of it.
+    it = out.get("intuneDevices")
+    if isinstance(it, dict) and isinstance(it.get("devices"), list):
+        rows = it["devices"]
+        comp = sum(1 for r in rows if r.get("compliance") == "compliant")
+        it["total"] = len(rows)
+        it["compliant"] = comp
+        it["noncompliant"] = len(rows) - comp
+        if "encrypted" in it:
+            it["encrypted"] = sum(1 for r in rows if r.get("encrypted"))
+        if "personal" in it:
+            it["personal"] = sum(1 for r in rows if r.get("owner") == "Personal")
+        notes.append(f"intuneDevices split: {comp} compliant + {len(rows) - comp} not = {len(rows)}")
+
+    # --- Rates must equal their own numerator over their own denominator -------------------------
+    for src, rate_key, num_key, den_key in [
+        ("riskySignins", "failRate", "failed", "logins"),
+        ("mfaStatus", "percent", "registered", "total"),
+        ("browserClaims", "provenPercent", "proven", "pilotMembers"),
+        ("secureScore", "percent", "current", "max"),
+    ]:
+        body = out.get(src)
+        if not isinstance(body, dict):
+            continue
+        num, den = body.get(num_key), body.get(den_key)
+        if isinstance(num, (int, float)) and isinstance(den, (int, float)) and den:
+            if num > den:                      # a subset cannot exceed its superset
+                body[num_key] = num = int(den * 0.62)
+            if rate_key in body:
+                body[rate_key] = round(num / den * 100, 1)
+                notes.append(f"{src}.{rate_key} = {body[rate_key]} ({num}/{den})")
+
+    # --- A "first" timestamp cannot be later than its "last" ------------------------------------
+    PAIRS = [("firstBlock", "lastBlock"), ("firstSeen", "lastSeen"), ("invited", "lastActivity"),
+             ("createdDateTime", "resolvedDateTime"), ("first", "last")]
+    swapped = [0]
+
+    def order_dates(node):
+        if isinstance(node, dict):
+            for a, b in PAIRS:
+                x, y = node.get(a), node.get(b)
+                if isinstance(x, str) and isinstance(y, str) and RE_ISO.match(x) \
+                        and RE_ISO.match(y) and x > y:
+                    node[a], node[b] = y, x
+                    swapped[0] += 1
+            for v in node.values():
+                order_dates(v)
+        elif isinstance(node, list):
+            for v in node:
+                order_dates(v)
+
+    order_dates(out)
+    if swapped[0]:
+        notes.append(f"first/last timestamps put back in order: {swapped[0]}")
+
+    # --- A list of scalars is a set ---------------------------------------------------------------
+    # Grant controls, platforms in scope, allowed domains, compliance requirements: none of these
+    # means anything twice. Duplicates appear whenever a pool is shorter than the list it fills, and
+    # they read as a data error rather than as filler. Deduplicated in one place instead of widening
+    # every pool and hoping.
+    deduped = [0]
+
+    def dedupe(node):
+        if isinstance(node, dict):
+            for k, v in list(node.items()):
+                if isinstance(v, list) and v and all(isinstance(x, str) for x in v):
+                    seen, uniq = set(), []
+                    for x in v:
+                        if x not in seen:
+                            seen.add(x)
+                            uniq.append(x)
+                    if len(uniq) != len(v):
+                        deduped[0] += 1
+                        node[k] = uniq
+                else:
+                    dedupe(v)
+        elif isinstance(node, list):
+            for v in node:
+                dedupe(v)
+
+    dedupe(out)
+    if deduped[0]:
+        notes.append(f"scalar lists deduplicated: {deduped[0]}")
 
     return notes
 

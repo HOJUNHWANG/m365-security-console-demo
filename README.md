@@ -1,4 +1,4 @@
-# MS365 Security Operations Console — public demo
+# M365 Security Console — public demo
 
 A single-pane security console for a Microsoft 365 tenant. It pulls the information that is
 otherwise scattered across the M365 admin center, Defender, Exchange Online and Entra portals into
@@ -10,7 +10,7 @@ It contains no tenant data, no credentials, and none of the operational runbooks
 repository it was derived from. How that is enforced — and machine-checked — is described in
 [Sanitisation](#sanitisation) below.
 
-> **Live demo — https://hojunhwang.github.io/ms365-secops-console-demo/**
+> **Live demo — https://hojunhwang.github.io/m365-security-console-demo/**
 > Every number, name, device and address on that page is generated. See `demo/`.
 
 ---
@@ -156,6 +156,25 @@ That is the entire argument for having it.
 on an empty tab or on `undefined` / `NaN` / `[object Object]` reaching the DOM — because a published
 static page has no operator watching a log.
 
+### Synthetic data has a second failure mode
+
+Sanitised is not the same as coherent. A generator that produces one value at a time cannot see
+relationships between fields, so the first fixture was provably free of tenant data *and* full of
+statements that contradicted each other: 47 devices above a histogram summing to 33, a 73% sign-in
+failure rate beside 130 failures out of 3,371, a `firstBlock` later than its own `lastBlock`, one
+Conditional Access policy name appearing three times, and — visible on the rendered page — mail
+classified "External" whose sender sat in the tenant's own domain.
+
+`demo/audit_fixture.py` checks the relationships rather than the values: counts against the lists
+they count, histograms against their totals, subsets against their supersets, rates against their own
+numerator and denominator, uniqueness where a value identifies its row, and `first`/`last` ordering.
+It found **64 contradictions in 6 categories** on its first run and now gates CI at zero.
+
+The fixes are rules, not patches: totals are re-derived from the lists beside them by name-matching
+rather than a hand-kept list of pairs; histograms are rebuilt by counting rows; scalar lists are
+deduplicated in one pass because a list of grant controls is a set; and Conditional Access policies
+are authored as whole objects, since name, state and controls are only meaningful together.
+
 ### Not included
 
 The private repository's operational material is absent by decision, not by oversight: the
@@ -196,7 +215,8 @@ you will keep seeing stale `403`s.
 ```bash
 node tests/demo_render_test.js     # renders every tab from the fixture
 node tests/nav_test.js             # sub-tab router and panel coverage
-python demo/verify_demo.py         # allowlist check on the committed fixture
+python demo/verify_demo.py         # no unexplained strings in the fixture
+python demo/audit_fixture.py       # the fixture does not contradict itself
 ```
 
 ---

@@ -31,8 +31,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      # Nothing is published that has not passed the sanitisation check first.
+      # Nothing is published that has not passed the sanitisation and coherence checks first.
       - run: python demo/verify_demo.py
+      - run: python demo/audit_fixture.py
       - run: node tests/demo_render_test.js
 
   deploy:

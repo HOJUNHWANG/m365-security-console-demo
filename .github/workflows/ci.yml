@@ -26,6 +26,9 @@ jobs:
       - name: Demo fixture carries no unexplained strings
         run: python demo/verify_demo.py
 
+      - name: Demo fixture does not contradict itself
+        run: python demo/audit_fixture.py
+
       - name: UI renders every tab from the fixture
         run: node tests/demo_render_test.js
 

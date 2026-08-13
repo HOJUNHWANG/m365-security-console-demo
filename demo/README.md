@@ -28,6 +28,19 @@ product vocabulary. **Read the second list.** It is the one place where a real s
 and it is short enough to check by eye — currently 99 entries, all Microsoft platform terms, UI enum
 tokens and Graph resource paths.
 
+## Auditing it
+
+```bash
+python demo/audit_fixture.py
+```
+
+A different question from the verifier's. The verifier asks whether real data survived; this asks
+whether the synthetic data contradicts itself — a count that disagrees with the list beside it, a
+histogram that does not sum to its total, a rate that is not its own numerator over its own
+denominator, a `firstBlock` later than its `lastBlock`, a duplicated identity. **Run it after every
+regeneration.** The first run found 64 contradictions, three of which were visible on the rendered
+page and none of which were visible in the JSON.
+
 ## Verifying it
 
 ```bash
