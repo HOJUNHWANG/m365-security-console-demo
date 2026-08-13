@@ -10,7 +10,7 @@ It contains no tenant data, no credentials, and none of the operational runbooks
 repository it was derived from. How that is enforced — and machine-checked — is described in
 [Sanitisation](#sanitisation) below.
 
-> **Live demo:** _(add the GitHub Pages URL here once Pages is enabled)_
+> **Live demo — https://hojunhwang.github.io/ms365-secops-console-demo/**
 > Every number, name, device and address on that page is generated. See `demo/`.
 
 ---
