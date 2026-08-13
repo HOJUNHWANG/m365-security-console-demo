@@ -10,6 +10,10 @@ It contains no tenant data, no credentials, and none of the operational runbooks
 repository it was derived from. How that is enforced — and machine-checked — is described in
 [Sanitisation](#sanitisation) below.
 
+Published as a personal portfolio piece with the approval of the organisation it was built for.
+**No licence is granted and reuse is not permitted without separate permission** — see
+[Permissions and licence](#permissions-and-licence).
+
 > **Live demo — https://hojunhwang.github.io/m365-security-console-demo/**
 > Every number, name, device and address on that page is generated. See `demo/`.
 
@@ -221,6 +225,26 @@ python demo/audit_fixture.py       # the fixture does not contradict itself
 
 ---
 
-## Licence
+## Permissions and licence
 
-None granted. This is published for portfolio review, not for reuse.
+**No licence is granted. All rights reserved.**
+
+This repository is published with the approval of the organisation the system was built for. That
+approval is specific: it covers **publishing this sanitised demo, with synthetic data, as a personal
+portfolio piece**. It does not extend to anything else.
+
+What that means in practice:
+
+- **You may** read the code and fork the repository on GitHub, to the extent GitHub's Terms of
+  Service allow for any public repository.
+- **You may not**, without separate written permission: copy this code into another project, reuse
+  it in whole or in part, redistribute or republish it, create derivative works, or use it
+  commercially or internally at another organisation.
+
+Publishing something openly and licensing it for reuse are two different decisions, and only the
+first one has been made here. There is deliberately no `LICENSE` file, because adding one would
+grant rights that are not mine to give away.
+
+If you want to use any of this, open an issue and ask — the answer is not automatically no, it just
+has to be asked. If you are here to evaluate the work rather than to reuse it, everything you need
+is already above.
