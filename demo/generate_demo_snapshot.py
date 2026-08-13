@@ -90,9 +90,41 @@ CITIES = ["Seattle, US", "Dublin, IE", "Singapore, SG", "Frankfurt, DE", "Toront
 MS_APPS = ["Microsoft Azure Portal", "Microsoft 365 Admin Center", "Microsoft Teams",
            "Office 365 Exchange Online", "Microsoft Intune Enrollment", "SharePoint Online",
            "Microsoft Intune Company Portal", "OfficeHome", "Microsoft Authentication Broker"]
-CA_POLICIES = ["CA01 - Require MFA for all users", "CA02 - Require MFA for admins",
-               "CA03 - Block legacy authentication", "CA04 - Require compliant device",
-               "CA05 - Approved device filter", "CA06 - Token protection (Windows)"]
+# Conditional Access policies are authored as WHOLE policies, not as independent pools of names,
+# states and controls. Drawing those separately produced rows like "CA01 - Require MFA for all users"
+# whose control was `compliantDevice`, and the same name three times over. A policy row is only
+# meaningful if its name, state and controls agree with each other.
+CA_POLICY_TABLE = [
+    {"name": "CA01 - Require MFA for all users", "state": "enabled",
+     "controls": ["mfa"], "sessionControls": [], "users": "All users", "apps": "All apps"},
+    {"name": "CA02 - Require MFA for admins", "state": "enabled",
+     "controls": ["mfa"], "sessionControls": [], "users": "3 target(s)", "apps": "All apps"},
+    {"name": "CA03 - Block legacy authentication", "state": "enabled",
+     "controls": ["block"], "sessionControls": [], "users": "All users", "apps": "All apps"},
+    {"name": "CA04 - Require compliant device", "state": "enabled",
+     "controls": ["compliantDevice"], "sessionControls": [], "users": "2 target(s)",
+     "apps": "All apps"},
+    {"name": "CA05 - Approved device filter",
+     "state": "enabledForReportingButNotEnforced",
+     "controls": ["block"], "sessionControls": [], "users": "1 target(s)", "apps": "All apps"},
+    {"name": "CA06 - Token protection (Windows)",
+     "state": "enabledForReportingButNotEnforced",
+     "controls": [], "sessionControls": ["secureSignInSession"], "users": "1 target(s)",
+     "apps": "1 app(s)"},
+    {"name": "CA07 - Sign-in frequency for privileged roles", "state": "enabled",
+     "controls": [], "sessionControls": ["signInFrequency"], "users": "3 target(s)",
+     "apps": "2 app(s)"},
+    {"name": "CA08 - Block access from unapproved locations", "state": "enabled",
+     "controls": ["block"], "sessionControls": [], "users": "All users", "apps": "All apps"},
+    {"name": "CA09 - Require MFA for guest access", "state": "enabled",
+     "controls": ["mfa"], "sessionControls": [], "users": "1 target(s)", "apps": "All apps"},
+    {"name": "CA10 - Block unsupported device platforms", "state": "enabled",
+     "controls": ["block"], "sessionControls": [], "users": "All users", "apps": "All apps"},
+    {"name": "CA11 - Require app protection for mobile", "state": "enabled",
+     "controls": ["compliantDevice"], "sessionControls": ["persistentBrowser"],
+     "users": "2 target(s)", "apps": "2 app(s)"},
+]
+CA_POLICIES = [p["name"] for p in CA_POLICY_TABLE]
 ROLES = ["Global Administrator", "Global Reader", "Exchange Administrator",
          "Intune Administrator", "Security Administrator", "User Administrator",
          "Directory Readers", "Conditional Access Administrator"]
@@ -593,7 +625,11 @@ class Gen:
             return out
         if isinstance(node, list):
             n = len(node)
-            if n and path not in FIXED_LENGTH_PATHS:
+            # Scale ENTITY lists only - lists of records, or long lists of names. A short list of
+            # scalars is an ATTRIBUTE of the row it sits on (a user's Windows editions, a policy's
+            # grant controls), and stretching one invents a second value that contradicts its own
+            # row: one user with two Windows editions, a policy whose control reads "block block".
+            if n and path not in FIXED_LENGTH_PATHS and (isinstance(node[0], dict) or n >= 5):
                 n = max(1, min(LIST_CAP, int(round(n * LIST_SCALE))))
             # Elements beyond the original length are produced by walking the existing ones again;
             # the generators are stateful, so each pass yields different synthetic values.
@@ -628,6 +664,82 @@ def source_vocabulary(root: pathlib.Path) -> set[str]:
                 if g:
                     lits.add(g.strip().lower())
     return {x for x in lits if x}
+
+
+def cohere(out: dict) -> list[str]:
+    """Fix the things a per-value generator structurally cannot get right.
+
+    A walker sees one leaf at a time, so it cannot know that a policy's control has to agree with
+    that policy's name, or that a sender's domain has to agree with the sibling field classifying
+    the mail as external. Those relationships are repaired here, after generation.
+    """
+    notes = []
+
+    # --- Conditional Access: stamp whole policies over the generated rows -----------------------
+    ea = out.get("entraAccess")
+    if isinstance(ea, dict) and isinstance(ea.get("caPolicies"), list):
+        rows = ea["caPolicies"][:len(CA_POLICY_TABLE)]      # never repeat a policy name
+        for row, spec in zip(rows, CA_POLICY_TABLE):
+            row.update({k: (list(v) if isinstance(v, list) else v) for k, v in spec.items()})
+            # One principal cannot be excluded twice from the same policy.
+            seen, uniq = set(), []
+            for ex in row.get("excluded") or []:
+                if ex.get("name") not in seen:
+                    seen.add(ex.get("name"))
+                    uniq.append(ex)
+            row["excluded"] = uniq
+            row["excludedCount"] = len(uniq)
+            row["excludedUnacknowledged"] = sum(1 for e in uniq if not e.get("acknowledged"))
+            row["excludedUnresolvable"] = 0
+        ea["caPolicies"] = rows
+
+        enabled = [r for r in rows if r["state"] == "enabled"]
+        report = [r for r in rows if r["state"] == "enabledForReportingButNotEnforced"]
+        ea["caPolicyCount"] = len(rows)
+        ea["caEnabledCount"] = len(enabled)
+        ea["caReportOnlyCount"] = len(report)
+        # The one flag the Overview raises a high-severity item from: is MFA actually enforced?
+        ea["mfaEnforcedByCa"] = any("mfa" in r["controls"] for r in enabled)
+        ea["securityDefaults"] = False        # mutually exclusive with active CA policies
+        all_ex = [e for r in rows for e in (r.get("excluded") or [])]
+        ea["exclusionTotal"] = len(all_ex)
+        ea["exclusionDistinct"] = len({e.get("name") for e in all_ex})
+        ea["exclusionUnacknowledged"] = sum(1 for e in all_ex if not e.get("acknowledged"))
+        ea["exclusionUnresolvable"] = 0
+        notes.append(f"caPolicies={len(rows)} ({len(enabled)} on, {len(report)} report-only), "
+                     f"exclusions={len(all_ex)}/{ea['exclusionDistinct']} distinct")
+
+    # --- Delivered mail: the sender's domain must match how the row is classified ---------------
+    # "External" beside a sender in our own domain is the tell that the address was minted without
+    # looking at the classification next to it.
+    th = out.get("threatHunting")
+    if isinstance(th, dict):
+        ext = [f"{f}.{l}@{d}" for d in SENDER_DOMAINS
+               for f, l in ((FIRST[i], LAST[i]) for i in range(3))]
+        allowed = [f"sales@{d}" for d in ("partner.example", "affiliate.example")] + \
+                  [f"noreply@{d}" for d in ("partner.example", "affiliate.example")]
+        fixed = 0
+        for key in ("delivered", "riskyClicks", "urlClicks", "zap"):
+            for i, row in enumerate(th.get(key) or []):
+                if not isinstance(row, dict) or "sender" not in row:
+                    continue
+                cat = row.get("cat")
+                if cat == "spoof":
+                    continue                              # forging our own domain: correct as is
+                pool = allowed if cat == "allow" else ext
+                row["sender"] = pool[i % len(pool)]
+                if "senderDomain" in row:
+                    row["senderDomain"] = row["sender"].split("@")[1]
+                fixed += 1
+        if fixed:
+            notes.append(f"senders re-domained to match their classification: {fixed}")
+        # The sender-domain histogram has to be drawn from the same universe.
+        for i, s in enumerate(th.get("senders") or []):
+            if isinstance(s, dict) and "domain" in s:
+                s["domain"] = (SENDER_DOMAINS + ["partner.example", DOMAIN])[
+                    i % (len(SENDER_DOMAINS) + 2)]
+
+    return notes
 
 
 def set_path(obj, dotted: str, value) -> bool:
@@ -722,6 +834,10 @@ def main() -> int:
             c["downKeys"], c["carriedKeys"] = [], []
             c["trigger"] = "loop" if i else "live"
         out["_dataHealth"] = health
+
+    # Relationships between fields, which a per-leaf walker cannot see.
+    for note in cohere(out):
+        print("cohere: " + note)
 
     # Consistency: a total the UI prints beside a list must match that list.
     fixed = []

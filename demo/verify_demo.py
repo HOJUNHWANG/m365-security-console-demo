@@ -43,7 +43,10 @@ SYNTHETIC = [
     re.compile(r"^\d{4}-\d{2}-\d{2}([T ][\d:.+-]+(Z|[+-]\d{2}:?\d{2})?)?$"),
     re.compile(r"^\d{1,10}$"),                                       # counts and numeric ids
     re.compile(r"^[\d.]+$"),
-    re.compile(r"^(smtp:)?[a-z]+@(partner|mail|backup)\.example$"),
+    # .example is reserved by RFC 2606 and can never be a real domain, so any address there is
+    # synthetic by construction - which is exactly why the generator uses it for outside senders.
+    re.compile(r"^(smtp:)?[a-z0-9._-]+@[a-z0-9.-]+\.example$"),
+    re.compile(r"^[a-z0-9-]+\.example$"),
     re.compile(r"^[A-Za-z][A-Za-z ]+ \d+$"),                         # generated labels
     re.compile(r"^$"),
 ]
