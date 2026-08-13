@@ -103,6 +103,54 @@ A collector is a module with a `fetch()` that returns a dict, registered in `reg
 is contained: the pipeline carries the last good value forward and marks it stale rather than
 blanking the tab.
 
+### Runtime shape
+
+Two processes, one file between them, and no database anywhere:
+
+```
+   Microsoft Graph  ──┐
+   (20 of 21 sources) │   ┌──────────────────────────────────────────┐
+                      ├──▶│ FastAPI process                          │
+   Exchange Online    │   │  in-process loop, every 20 min, 07–17    │
+   PowerShell  ──▶ data/exo_snapshot.json ──▶ exchange_eop.py        │
+   collector          │   │  pipeline: collect → AI summary → cache  │
+   (3x/day, cert)     │   │  data/graph_snapshot.json  (~200 KB)     │
+                      │   │  data/graph_history.json   (trend points)│
+                      │   └───────────────┬──────────────────────────┘
+                      │      /api/summary │  serves the CACHED snapshot instantly
+                      │      ?live=1      │  forces a fresh collection (~30–75 s)
+                      │      /api/health  │  built per request, never stored
+                      │                   ▼
+                      │        index.html — ONE fetch, vanilla JS, no build step
+```
+
+**Exchange Online is a side channel, not a Graph collector.** Graph does not expose auto-forwarding,
+inbox rules, mailbox delegation or transport rules, so that data comes from Exchange Online
+PowerShell running as a separate scheduled process three times a day. It writes a JSON snapshot and
+`app/sources/exchange_eop.py` only reads that file and reports its age — which is why that collector
+makes no network call, and why the mail-security tab can be stale while everything else is current.
+**That PowerShell collector is not in this repository** (it is operational tooling, see
+[Not included](#not-included)); the source that consumes its output is.
+
+**Collection is in-process, with a scheduled task as a backstop.** It used to be the other way round.
+A calendar trigger with a repetition does not arm at all if the machine is asleep at the daily
+occurrence time, which cost a full day of collection twice; the web process, by contrast, survives
+standby. The loop skips a cycle if the snapshot is younger than half the interval, stays inside
+working hours (`COLLECT_ACTIVE_HOURS`, default `7-17`) so an unattended box does not poll a tenant
+overnight, and keeps the last 24 cycle outcomes in memory for the Data Health tab.
+
+**Request budget matters more than speed.** All Graph calls share one process-wide semaphore of 6,
+and `/auditLogs/signIns` — which several sources need — is paged into a shared 7-day window at 250
+records a page with a delay between pages and a per-cycle page cap, so a cold start converges over
+several cycles instead of hammering the endpoint once. Throttling is not retried within the same
+cycle: a 429 means the budget is gone, and spending the rest of the cycle discovering that again is
+how a throttle sustains itself.
+
+**Storage is two JSON files.** No database, no ORM, no migrations — one snapshot that is overwritten
+wholesale each collect, and one append-only history file behind the trend sparklines. That is a
+deliberate ceiling: it is why remediating a finding clears its badge by itself, and equally why an
+accepted risk cannot be recorded.
+
 ### Authentication
 
 Two app-only credentials on one app registration, and no delegated sign-in anywhere:
@@ -112,9 +160,15 @@ Two app-only credentials on one app registration, and no delegated sign-in anywh
 | Microsoft Graph (21 collectors) | app registration + **client secret**, MSAL client-credentials | all permissions are `*.Read.All` |
 | Exchange Online collector | the same app + **certificate** (`Exchange.ManageAsApp`) | EXO app-only does not accept a secret |
 
-The service principal holds **Global Reader**. Access to the page itself is a separate layer — the
-private deployment sits behind an identity-aware proxy restricted to one administrator, because the
-page shows an organisation's full security posture to anyone who can load it.
+The service principal holds **Global Reader**, and every Graph permission is `*.Read.All`. Identity
+Protection (risky users, risk detections) is deliberately not collected: those endpoints require
+Entra ID P2, and a source that returns 403 on the licence tier it runs against would be a permanently
+red card rather than a signal.
+
+Access to the page itself is a separate layer. The app binds to localhost and is published through an
+identity-aware proxy restricted to a single administrator; it has no login of its own, no session
+handling and no user model, because the page shows an organisation's entire security posture to
+anyone who can load it. Deployment specifics beyond that are deliberately not documented here.
 
 ---
 
