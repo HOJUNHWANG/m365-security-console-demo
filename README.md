@@ -1,0 +1,356 @@
+# M365 Security Console — public demo
+
+A single-pane security console for a Microsoft 365 tenant. It pulls the information that is
+otherwise scattered across the M365 admin center, Defender, Exchange Online and Entra portals into
+one read-only screen: 26 collectors, 17 tabs and 23 sub-tabs, derived action items, a Korean/English
+UI, and a tab that reports on the health of the collection itself.
+
+**This repository is a sanitised demo.** It contains the application code and a synthetic dataset.
+It contains no tenant data, no credentials, and none of the operational runbooks from the private
+repository it was derived from. How that is enforced — and machine-checked — is described in
+[Sanitisation](#sanitisation) below.
+
+Published as a personal portfolio piece with the approval of the organisation it was built for.
+**No licence is granted and reuse is not permitted without separate permission** — see
+[Permissions and licence](#permissions-and-licence).
+
+> **Live demo — https://hojunhwang.github.io/m365-security-console-demo/**
+> Every number, name, device and address on that page is generated. See `demo/`.
+
+---
+
+## What it does
+
+Read-only monitoring, deliberately. There are no Graph write permissions anywhere in the codebase
+and no write helpers to add one carelessly. Response actions (disabling an account, revoking
+sessions) stay in the portals, because doing them from here would mean holding write scopes on an
+app-only credential that runs unattended.
+
+| Area | What the tab answers |
+|---|---|
+| Overview | What needs attention right now, and is the posture trending up or down |
+| Identity & access | Who holds privilege, who has no MFA, which guests are dormant, when app credentials expire |
+| Devices | Does each enrolled device have one identity that Conditional Access can see |
+| Browser claims | Is a device claim present in browser sign-ins — the precondition for device-based CA |
+| Threats & alerts | Incidents, alerts, attack-simulation results |
+| Email threats | Delivered-threat hunting, sender patterns, ZAP outcomes, risky link clicks |
+| Mail security | Auto-forwarding, risky inbox rules, mailbox delegation, quarantine, transport rules |
+| Sharing | Anonymous links that actually exist, not just the tenant setting that permits them |
+| Posture | Secure Score and its highest-value improvement actions |
+| Audit & activity | Recent directory changes and sign-in failure patterns |
+| Conditional Access | What each policy actually evaluates, and who a not-yet-enforced policy would block |
+| CA exceptions | Which exclusions exist, which were never recorded, and what removes them (nothing does) |
+| Enterprise apps | What users have consented to, which grants reach data, which apps nobody signs into |
+| Data loss (DLP) | What a policy in simulation mode would have caught, by sensitive type and location |
+| Defender posture | Antivirus and update state, and which devices have stopped reporting at all |
+| MAM registrations | Who is targeted by app-protection policy and has no registration - a failed device check produces no row, only an absence |
+| Data health | Is each source fresh, stale or down; request volume, throttling, window coverage |
+
+### Design decisions worth reading the code for
+
+These are the problems that shaped the app. They are described here as engineering lessons; the
+specifics of any one tenant are not part of this repository.
+
+- **A device can have two Entra identities, and Conditional Access only sees one of them.** An
+  MDM-only enrolment creates a stub device object with a null `trustType`; the device keeps
+  authenticating with its older registration. Intune points at the stub, so tagging "the device" by
+  Intune's `azureADDeviceId` tags the object that never signs in — and a device-filter policy then
+  blocks a machine that is enrolled, compliant *and* tagged. Neither portal shows the disagreement.
+  `app/sources/device_identity.py` reconciles sign-in claim, Intune id and tag as a three-way match.
+
+- **Never branch Conditional Access logic on a sign-in's top-level `conditionalAccessStatus`.** It
+  reflects *enforced* policies only, so a sign-in that a report-only policy would have blocked still
+  reads as `success`. One walk over `appliedConditionalAccessPolicies[].result` handles both
+  lifecycles, which means the cutover from report-only to enforced needs no code change and the
+  pilot prediction and the real outcome are the same metric.
+
+- **Report-only counts over-report device policies.** A claimless browser session fails a device
+  filter for lack of a claim, not because the device is non-compliant, so the blast radius reads as
+  an upper bound rather than a forecast. The UI says so on the card, because a number that is
+  presented as a prediction will be acted on as one.
+
+- **A "nothing to do" branch that logs at DEBUG is a silent failure mode.** The collection loop slept
+  one interval after finishing and stamped its timestamp at the same instant, so the freshness guard
+  was decided by floating-point jitter; a skip logged at DEBUG (which uvicorn does not print) then
+  halved the effective cadence. Externally that is indistinguishable from a dead collector. It is now
+  compared against half the interval and skips log at INFO.
+
+- **Derived alerts have a cost, and it is worth naming.** Badges and action items are computed from
+  the current snapshot and never stored, so remediating something clears its badge by itself. The
+  flip side: there is no way to record an accepted risk, and a source that fails to collect makes its
+  warnings *disappear* rather than turn red — so the header reports `N/M sources` separately.
+
+- **Session controls are not grant controls.** Reading only `grantControls.builtInControls` makes a
+  token-protection or sign-in-frequency policy look like it enforces nothing.
+
+- **A translation dictionary is a specification for display values.** Adding a language toggle turned
+  the i18n test into the strictest schema check in the repository: any value the UI renders through
+  `t()` without an entry is a visible untranslated string. It immediately caught the demo fixture
+  using `medium` where the app's token is `med`, `HighConfPhish` where Exchange reports
+  `High Confidence Phish`, and an edition pool that made the UI print "Windows Windows 11 Pro".
+  None of those are translation problems; they are wrong data, found by a translation test.
+
+- **A string with a number interpolated into it can never be translated by lookup.** `t('819 in 147.4
+  min')` has no possible key. The fix is `tf('{0} in {1} min', a, b)`, and until then such strings are
+  excluded from the check on shape rather than one at a time - a list of literals would grow forever
+  and hide the real gaps.
+
+- **A tenant setting is a ceiling, not a state.** Per-site sharing capability is not exposed by
+  Microsoft Graph at all, so the sharing card enumerates the anonymous links that exist rather than
+  reporting the setting that allows them.
+
+---
+
+## Architecture
+
+```
+app/
+  main.py            FastAPI app, in-process collection loop, /api/summary and /api/health
+  registry.py        the source registry - one line per collector
+  pipeline.py        collect -> AI summary -> cache + history, shared by the loop and the endpoint
+  graph_client.py    MSAL app-only token, shared concurrency limit, retry/throttle handling
+  signin_cache.py    a shared sign-in window several sources read from, paged and budgeted
+  cache.py           snapshot + metric history on disk
+  ai_overview.py     optional AI summary; sends aggregate metrics only, never PII
+  sources/           26 collectors, each returning {available, ...} and nothing else
+  static/index.html  the entire UI - vanilla JS, one fetch, no build step
+```
+
+A collector is a module with a `fetch()` that returns a dict, registered in `registry.py`. A failure
+is contained: the pipeline carries the last good value forward and marks it stale rather than
+blanking the tab.
+
+### Runtime shape
+
+Two processes, one file between them, and no database anywhere:
+
+```
+   Microsoft Graph  ──┐
+   (25 of 26 sources) │   ┌──────────────────────────────────────────┐
+                      ├──▶│ FastAPI process                          │
+   Exchange Online    │   │  in-process loop, every 20 min, 07–17    │
+   PowerShell  ──▶ data/exo_snapshot.json ──▶ exchange_eop.py        │
+   collector          │   │  pipeline: collect → AI summary → cache  │
+   (3x/day, cert)     │   │  data/graph_snapshot.json  (~200 KB)     │
+                      │   │  data/graph_history.json   (trend points)│
+                      │   └───────────────┬──────────────────────────┘
+                      │      /api/summary │  serves the CACHED snapshot instantly
+                      │      ?live=1      │  forces a fresh collection (~30–75 s)
+                      │      /api/health  │  built per request, never stored
+                      │                   ▼
+                      │        index.html — ONE fetch, vanilla JS, no build step
+```
+
+**Exchange Online is a side channel, not a Graph collector.** Graph does not expose auto-forwarding,
+inbox rules, mailbox delegation or transport rules, so that data comes from Exchange Online
+PowerShell running as a separate scheduled process three times a day. It writes a JSON snapshot and
+`app/sources/exchange_eop.py` only reads that file and reports its age — which is why that collector
+makes no network call, and why the mail-security tab can be stale while everything else is current.
+**That PowerShell collector is not in this repository** (it is operational tooling, see
+[Not included](#not-included)); the source that consumes its output is.
+
+**Collection is in-process, with a scheduled task as a backstop.** It used to be the other way round.
+A calendar trigger with a repetition does not arm at all if the machine is asleep at the daily
+occurrence time, which can cost a full day of collection; the web process, by contrast, survives
+standby. The loop skips a cycle if the snapshot is younger than half the interval, stays inside
+working hours (`COLLECT_ACTIVE_HOURS`, default `7-17`) so an unattended box does not poll a tenant
+overnight, and keeps the last 24 cycle outcomes in memory for the Data Health tab.
+
+**Request budget matters more than speed.** All Graph calls share one process-wide semaphore of 6,
+and `/auditLogs/signIns` — which several sources need — is paged into a shared 7-day window at 250
+records a page with a delay between pages and a per-cycle page cap, so a cold start converges over
+several cycles instead of hammering the endpoint once. Throttling is not retried within the same
+cycle: a 429 means the budget is gone, and spending the rest of the cycle discovering that again is
+how a throttle sustains itself.
+
+**Storage is two JSON files.** No database, no ORM, no migrations — one snapshot that is overwritten
+wholesale each collect, and one append-only history file behind the trend sparklines. That is a
+deliberate ceiling: it is why remediating a finding clears its badge by itself, and equally why an
+accepted risk cannot be recorded.
+
+### Keeping the demo in sync
+
+The private application keeps moving, so `app/` and `tests/` are copied wholesale from it rather
+than cherry-picked. That means the edits which make it work as a static page get replaced with
+them, which is why they live in scripts instead of in someone's memory:
+
+```bash
+# 1. copy app/ AND tests/ wholesale from the private repository (keep app/static/demo-summary.json)
+# 2. scrub tenant literals and operational narrative out of the copied source, including
+#    user-facing strings and server-generated finding text (private script, not in this repo)
+python demo/strip_comments.py        # 3. remove every comment and docstring, verified by AST/tokens
+python demo/apply_demo_mode.py       # 4. re-apply the demo-only edits, idempotently
+python demo/generate_demo_snapshot.py --snapshot ... --history ... --health ...   # 5. rebuild
+python demo/verify_demo.py --snapshot ... --harvest ...   # 6. both checks, including the blocklist
+python demo/audit_fixture.py                              # 7. no self-contradiction
+for f in tests/*.js; do node "$f"; done                   # 8. renders, routes, both languages
+```
+
+**Comments are not published.** The private source is commented for the people who operate it, so
+its comments explain operational history rather than the code. `demo/strip_comments.py` removes all
+of them - Python comments and docstrings via `tokenize` and `ast`, and JS, CSS and HTML comments in
+`index.html` and `tests/*.js` via string- and regex-aware scanners - and refuses to write a file
+unless the result is provably the same program: an identical AST for Python (minus docstrings), and
+an identical token stream, including where line breaks fall, for JS. It runs before the fixture is
+regenerated, because the generator's verbatim-passthrough rule treats the app source as vocabulary;
+a value that appeared only in a comment must not count as known.
+
+`apply_demo_mode.py --check` and `strip_comments.py --check` both run in CI, so a re-sync that drops
+an edit or brings comments back fails the build. `apply_demo_mode.py` covers `tests/` as well as the
+page: the test suite is upstream's too, so re-syncing it overwrites the things the demo needs from
+it, namely every test reading the committed fixture instead of a private snapshot path, and the
+recorded list of upstream i18n gaps. Its markers and replacements are plain code, so its output passes the
+comment check too.
+
+### Authentication
+
+Two app-only credentials on one app registration, and no delegated sign-in anywhere:
+
+| Path | Credential | Why |
+|---|---|---|
+| Microsoft Graph (25 collectors) | app registration + **client secret**, MSAL client-credentials | all permissions are `*.Read.All` |
+| Exchange Online collector | the same app + **certificate** (`Exchange.ManageAsApp`) | EXO app-only does not accept a secret |
+
+The service principal holds **Global Reader**, and every Graph permission is `*.Read.All`. Identity
+Protection (risky users, risk detections) is deliberately not collected: those endpoints require
+Entra ID P2, and a source that returns 403 on the licence tier it runs against would be a permanently
+red card rather than a signal.
+
+Access to the page itself is a separate layer. The app binds to localhost and is published through an
+identity-aware proxy restricted to a single administrator; it has no login of its own, no session
+handling and no user model, because the page shows an organisation's entire security posture to
+anyone who can load it. Deployment specifics beyond that are deliberately not documented here.
+
+---
+
+## Sanitisation
+
+The interesting part of publishing this was proving that nothing came with it.
+
+**Masking a real snapshot was rejected.** A snapshot of this dashboard holds hundreds of unique
+UPNs and object ids, plus device names, source IPs and mail subjects, spread over 26 sources and
+more than a thousand distinct JSON paths. Masking means finding all of them, and one missed field is a disclosure
+you cannot prove you avoided.
+
+**Counts are data too.** "Six global admins, 47 enrolled devices, ten guests" survives value-level
+masking untouched, because it is carried by the *length* of a list rather than by anything inside it.
+Every list is therefore resized by one shared factor — shared, so that sources describing the same
+fleet from different angles stay consistent with each other.
+
+So `demo/generate_demo_snapshot.py` reads a real snapshot for its **shape only** — keys, types, list
+lengths — and generates every leaf value. In priority order: an authored pool for paths the UI
+branches on; a synthetic identifier for anything matching an identifier shape (`contoso.com`,
+`LAPTOP-DEMO###`, RFC 5737 documentation IPs, `2001:db8::`); verbatim passthrough *only* if the exact
+string is a literal in this repository's own source, which makes it product vocabulary the UI
+compares against (`compliant`, `reportOnlyFailure`) rather than a fact about a tenant; and otherwise
+a label derived from the JSON path. Identifier mappings are consistent, so a person referenced by two
+sources is the same fake person in both.
+
+`demo/verify_demo.py` then checks the result two ways, and the difference matters:
+
+- **Allowlist** — every string in the committed fixture must be an authored pool value, a synthetic
+  identifier, a timestamp, or a source literal. Anything unexplained fails. This needs no access to
+  private data, so it runs in CI on every push.
+- **Blocklist** — no identifier harvested from the private material (the real snapshot *and* the
+  private repository's docs, scripts and `.env`, some 6,700 terms) may appear anywhere in this
+  repository. An allowlist can be wrong if it was built from something tainted; this catches that.
+  Placeholder noise (`a@x.com`, `*.example`, documentation IP ranges) is filtered by value, never by
+  file: freshly copied source exists in both trees, and it is the likeliest place for a real value.
+
+The blocklist check found a leak the hand-written pass had missed: a partner domain sitting in a
+source comment. That is the argument for having it - and, together with the operational history
+comments carried, the reason comments are no longer published at all.
+
+`tests/demo_render_test.js` renders every tab and sub-tab from the fixture in a headless harness and fails
+on an empty tab or on `undefined` / `NaN` / `[object Object]` reaching the DOM — because a published
+static page has no operator watching a log.
+
+### Synthetic data has a second failure mode
+
+Sanitised is not the same as coherent. A generator that produces one value at a time cannot see
+relationships between fields, so the first fixture was provably free of tenant data *and* full of
+statements that contradicted each other: 47 devices above a histogram summing to 33, a 73% sign-in
+failure rate beside 130 failures out of 3,371, a `firstBlock` later than its own `lastBlock`, one
+Conditional Access policy name appearing three times, and — visible on the rendered page — mail
+classified "External" whose sender sat in the tenant's own domain.
+
+`demo/audit_fixture.py` checks the relationships rather than the values: counts against the lists
+they count, histograms against their totals, subsets against their supersets, rates against their own
+numerator and denominator, uniqueness where a value identifies its row, and `first`/`last` ordering.
+It found **64 contradictions in 6 categories** on its first run and now gates CI at zero.
+
+The fixes are rules, not patches: totals are re-derived from the lists beside them by name-matching
+rather than a hand-kept list of pairs; histograms are rebuilt by counting rows; scalar lists are
+deduplicated in one pass because a list of grant controls is a set; and Conditional Access policies
+are authored as whole objects, since name, state and controls are only meaningful together.
+
+### Not included
+
+The private repository's operational material is absent by decision, not by oversight: the
+engineering handoff document, device and Conditional Access runbooks, the cutover and remediation
+scripts, and every collected snapshot. Masking would not have helped — a document describing which
+weaknesses are not yet fixed is an attacker's roadmap whether or not the names are starred out.
+
+---
+
+## Running it
+
+**The demo, with no credentials and no backend** — open `app/static/index.html` over HTTP:
+
+```bash
+python -m http.server 8080 --directory app/static
+# then open http://127.0.0.1:8080
+```
+
+The page tries `/api/summary` first, and on failure falls back to the bundled
+`app/static/demo-summary.json` and shows a `DEMO DATA` chip. Timestamps in the fixture are shifted so
+`_collectedAt` becomes "now" — otherwise a published demo would permanently display the
+stale-data warning the header exists to raise.
+
+**Against a real tenant** — an app registration with the read-only application permissions listed in
+`.env.example`, admin-consented:
+
+```bash
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env      # fill in tenant id, client id, client secret
+uvicorn app.main:app --reload
+```
+
+MSAL caches the app-only token per process, so restart uvicorn after granting a new permission or
+you will keep seeing stale `403`s.
+
+**Tests** (no dependencies beyond Node and Python):
+
+```bash
+node tests/demo_render_test.js     # renders every tab from the fixture
+node tests/nav_test.js             # sub-tab router and panel coverage
+python demo/verify_demo.py         # no unexplained strings in the fixture
+python demo/audit_fixture.py       # the fixture does not contradict itself
+python demo/strip_comments.py --check   # no comment or docstring has come back
+```
+
+---
+
+## Permissions and licence
+
+**No licence is granted. All rights reserved.**
+
+This repository is published with the approval of the organisation the system was built for. That
+approval is specific: it covers **publishing this sanitised demo, with synthetic data, as a personal
+portfolio piece**. It does not extend to anything else.
+
+What that means in practice:
+
+- **You may** read the code and fork the repository on GitHub, to the extent GitHub's Terms of
+  Service allow for any public repository.
+- **You may not**, without separate written permission: copy this code into another project, reuse
+  it in whole or in part, redistribute or republish it, create derivative works, or use it
+  commercially or internally at another organisation.
+
+Publishing something openly and licensing it for reuse are two different decisions, and only the
+first one has been made here. There is deliberately no `LICENSE` file, because adding one would
+grant rights that are not mine to give away.
+
+If you want to use any of this, open an issue and ask — the answer is not automatically no, it just
+has to be asked. If you are here to evaluate the work rather than to reuse it, everything you need
+is already above.

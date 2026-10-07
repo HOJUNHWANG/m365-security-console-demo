@@ -1,0 +1,83 @@
+name: checks
+
+# The allowlist check is the reason this workflow exists: it re-proves on every push that no string
+# in the committed fixture is unaccounted for. It needs no private data, so it can run here.
+# The blocklist check cannot - it needs the real snapshot - and is run locally before publishing.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Demo fixture carries no unexplained strings
+        run: python demo/verify_demo.py
+
+      - name: Demo fixture does not contradict itself
+        run: python demo/audit_fixture.py
+
+      - name: UI renders every tab from the fixture
+        run: node tests/demo_render_test.js
+
+      - name: Sub-tab router and panel coverage
+        run: node tests/nav_test.js
+
+      - name: Grid layout
+        run: node tests/grid_test.js
+
+      - name: Conditional Access evaluation logic
+        run: node tests/ca_eval_test.js
+
+      - name: Stale-source banner
+        run: node tests/stale_banner_test.js
+
+      - name: Both languages render, and nothing untranslated reaches the UI
+        run: node tests/i18n_test.js
+
+      - name: Device Identity badges
+        run: node tests/device_identity_badge_test.js
+
+      - name: Data Health tab
+        run: node tests/health_tab_test.js
+
+      - name: Theme switching
+        run: node tests/theme_test.js
+
+      - name: Temporary-password generator
+        run: node tests/draft_password_test.js
+
+      # The demo-only edits live in one script so a re-sync of app/ from the private repository
+      # cannot silently drop them. --check fails if any is missing.
+      - name: Demo-mode edits are all in place
+        run: python demo/apply_demo_mode.py --check
+
+      # The published source carries no comments or docstrings: upstream's comments describe
+      # operations, not code. --check fails if a re-sync brought any back.
+      - name: No comments or docstrings in published source
+        run: python demo/strip_comments.py --check
+
+      - name: App code imports cleanly
+        run: |
+          python -m pip install -r requirements.txt
+          python -c "import ast, pathlib, sys
+          bad = []
+          for p in pathlib.Path('app').rglob('*.py'):
+              try:
+                  ast.parse(p.read_text(encoding='utf-8'))
+              except SyntaxError as e:
+                  bad.append(f'{p}: {e}')
+          print('\n'.join(bad) or 'all modules parse')
+          sys.exit(1 if bad else 0)"
